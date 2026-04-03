@@ -66,6 +66,7 @@ class MultiDetectorLikelihood(bilby.Likelihood):
     ):
         self.model_dictionary = model_dictionary
         self.likelihood_dictionary = {}
+        self.detector_parameter_names = {}
         self._noise_log_likelihood = log_noise_evidence
 
         parameters = {}
@@ -79,24 +80,30 @@ class MultiDetectorLikelihood(bilby.Likelihood):
 
             # Add keys to global parameters, provide unique kernel names for each detector
             keys = [key for key in likelihood.parameters]
+            self.detector_parameter_names[detector] = set(keys)
             parameters.update({key: None for key in keys})
 
         super().__init__(parameters=parameters)
 
-    def log_likelihood(self):
+    def log_likelihood(self, parameters=None):
+        if parameters is None:
+            parameters = self.parameters
+
         logl = 0
         for detector, likelihood in self.likelihood_dictionary.items():
+            likelihood_parameters = {}
+            detector_parameter_names = self.detector_parameter_names[detector]
 
             # Update the parameters of the per-detector likelihoods
-            for key, value in self.parameters.items():
-                if key in likelihood.parameters:
-                    likelihood.parameters[key] = value
+            for key, value in parameters.items():
+                if key in detector_parameter_names:
+                    likelihood_parameters[key] = value
 
                 lkey = key.replace(f"{detector}-", "")
-                if lkey in likelihood.parameters:
-                    likelihood.parameters[lkey] = value
+                if lkey in detector_parameter_names:
+                    likelihood_parameters[lkey] = value
 
-            logl += likelihood.log_likelihood()
+            logl += likelihood.log_likelihood(parameters=likelihood_parameters)
 
         return logl
 
@@ -165,8 +172,11 @@ class SingleDetectorCeleriteLikelihood(bilby.Likelihood):
                 if gpkey in self.gp_parameter_names:
                     self.gp.set_parameter(gpkey, val)
 
-    def log_likelihood(self):
-        self.update_gp_parameters(self.parameters)
+    def log_likelihood(self, parameters=None):
+        if parameters is None:
+            parameters = self.parameters
+
+        self.update_gp_parameters(parameters)
         try:
             return self.gp.log_likelihood(self.y_scaled)
         except Exception as e:
