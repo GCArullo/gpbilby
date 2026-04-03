@@ -25,6 +25,7 @@ class GWModel(_Model):
         super().__init__(**init_values)
         self.bilby_detector = None
         self.pre_trigger_duration = None
+        self.bilby_waveform_generator = None
 
     def initiate_model(self, strain, inputs):
         self.strain = strain
@@ -70,7 +71,17 @@ class GWModel(_Model):
             reference_frame=self.inputs.whittle_likelihood.reference_frame,
             pre_trigger_duration=self.pre_trigger_duration,
             error=False,
+            waveform_dictionary=self.waveform_dictionary,
+            waveform_generator=self.get_bilby_waveform_generator(time),
+            frequency_domain_source_model=self.inputs.frequency_domain_source_model,
         )
+
+    def get_bilby_waveform_generator(self, time):
+        if self.bilby_waveform_generator is None:
+            self.bilby_waveform_generator = instantiate_bilby_waveform_generator(
+                self.inputs, time
+            )
+        return self.bilby_waveform_generator
 
 
 def get_gw_waveform(
@@ -84,6 +95,8 @@ def get_gw_waveform(
     pre_trigger_duration=None,
     error=False,
     waveform_dictionary=None,
+    waveform_generator=None,
+    frequency_domain_source_model=None,
 ):
     par, _ = bilby.gw.conversion.convert_to_lal_binary_black_hole_parameters(parameters)
 
@@ -179,40 +192,73 @@ def get_gw_waveform(
     if waveform_dictionary is None:
         waveform_dictionary = lal.CreateDict()
 
-    h_plus_timeseries, h_cross_timeseries = lalsim.SimInspiralChooseTDWaveform(
-        *args, waveform_dictionary, approximant
+    use_bilby_generator = should_use_bilby_waveform_generator(
+        approximant, frequency_domain_source_model
     )
 
-    plus_polarization_tensor = get_polarization_tensor(
-        par["ra"], par["dec"], par["geocent_time"], par["psi"], "plus"
-    )
-    f_plus = np.einsum(
-        "ij,ij->", bilby_detector.detector_tensor, plus_polarization_tensor
-    )
+    if use_bilby_generator:
+        if waveform_generator is None:
+            raise ValueError(
+                f"No bilby waveform generator available for {waveform_approximant}"
+            )
+        strain_interp = get_gw_waveform_via_bilby_generator(
+            time=time,
+            parameters=parameters,
+            sky_parameters=par,
+            bilby_detector=bilby_detector,
+            waveform_generator=waveform_generator,
+        )
+    else:
+        try:
+            h_plus_timeseries, h_cross_timeseries = lalsim.SimInspiralChooseTDWaveform(
+                *args, waveform_dictionary, approximant
+            )
+        except Exception as exc:
+            if waveform_generator is None or not should_retry_with_bilby_waveform_generator(
+                exc
+            ):
+                raise
+            strain_interp = get_gw_waveform_via_bilby_generator(
+                time=time,
+                parameters=parameters,
+                sky_parameters=par,
+                bilby_detector=bilby_detector,
+                waveform_generator=waveform_generator,
+            )
+        else:
+            plus_polarization_tensor = get_polarization_tensor(
+                par["ra"], par["dec"], par["geocent_time"], par["psi"], "plus"
+            )
+            f_plus = np.einsum(
+                "ij,ij->", bilby_detector.detector_tensor, plus_polarization_tensor
+            )
 
-    cross_polarization_tensor = get_polarization_tensor(
-        par["ra"], par["dec"], par["geocent_time"], par["psi"], "cross"
-    )
-    f_cross = np.einsum(
-        "ij,ij->", bilby_detector.detector_tensor, cross_polarization_tensor
-    )
+            cross_polarization_tensor = get_polarization_tensor(
+                par["ra"], par["dec"], par["geocent_time"], par["psi"], "cross"
+            )
+            f_cross = np.einsum(
+                "ij,ij->", bilby_detector.detector_tensor, cross_polarization_tensor
+            )
 
-    h_plus = h_plus_timeseries.data.data
-    h_cross = h_cross_timeseries.data.data
-    h_plus_time = np.arange(len(h_plus)) * h_plus_timeseries.deltaT + float(
-        h_plus_timeseries.epoch
-    )
+            h_plus = h_plus_timeseries.data.data
+            h_cross = h_cross_timeseries.data.data
+            h_plus_time = np.arange(len(h_plus)) * h_plus_timeseries.deltaT + float(
+                h_plus_timeseries.epoch
+            )
 
-    time_shift = bilby_detector.time_delay_from_geocenter(
-        par["ra"], par["dec"], par["geocent_time"]
-    )
+            time_shift = bilby_detector.time_delay_from_geocenter(
+                par["ra"], par["dec"], par["geocent_time"]
+            )
 
-    predicted_strain = f_plus * h_plus + f_cross * h_cross
-    predicted_strain_time = h_plus_time + par["geocent_time"] + time_shift
+            predicted_strain = f_plus * h_plus + f_cross * h_cross
+            predicted_strain_time = h_plus_time + par["geocent_time"] + time_shift
 
-    strain_interp = interp1d(
-        predicted_strain_time, predicted_strain, fill_value=0, bounds_error=False
-    )(time)
+            strain_interp = interp1d(
+                predicted_strain_time,
+                predicted_strain,
+                fill_value=0,
+                bounds_error=False,
+            )(time)
 
     if strain_interp[0] == 0:
         idxs = strain_interp != 0
@@ -225,3 +271,71 @@ def get_gw_waveform(
             if fduration > 0.9:
                 pass
     return strain_interp
+
+
+def instantiate_bilby_waveform_generator(inputs, time):
+    delta_t = float(time[1] - time[0])
+    duration = float(len(time) * delta_t)
+    constructor_kwargs = inputs.get_default_waveform_generator_class_ctor_arguments()
+    for key in [
+        "duration",
+        "sampling_frequency",
+        "start_time",
+        "frequency_domain_source_model",
+        "time_domain_source_model",
+        "parameter_conversion",
+        "waveform_arguments",
+    ]:
+        constructor_kwargs.pop(key, None)
+
+    return inputs.waveform_generator_class(
+        **constructor_kwargs,
+        frequency_domain_source_model=inputs.bilby_frequency_domain_source_model,
+        sampling_frequency=1.0 / delta_t,
+        duration=duration,
+        start_time=float(time[0]),
+        parameter_conversion=inputs.parameter_conversion,
+        waveform_arguments=inputs.get_default_waveform_arguments(),
+    )
+
+
+def should_use_bilby_waveform_generator(approximant, frequency_domain_source_model):
+    uses_custom_source_model = frequency_domain_source_model not in [
+        None,
+        "lal_binary_black_hole",
+    ]
+    return uses_custom_source_model or not lalsim.SimInspiralImplementedTDApproximants(
+        approximant
+    )
+
+
+def should_retry_with_bilby_waveform_generator(exc):
+    message = " ".join(str(arg) for arg in exc.args)
+    return "no generator defined" in message.lower() or "check failed: generator" in message.lower()
+
+
+def get_gw_waveform_via_bilby_generator(
+    time, parameters, sky_parameters, bilby_detector, waveform_generator
+):
+    waveform_polarizations = waveform_generator.time_domain_strain(parameters)
+    if waveform_polarizations is None:
+        raise ValueError("Waveform generator returned no time-domain polarizations")
+
+    signal = np.zeros(len(time))
+    for mode, polarization in waveform_polarizations.items():
+        det_response = bilby_detector.antenna_response(
+            sky_parameters["ra"],
+            sky_parameters["dec"],
+            sky_parameters["geocent_time"],
+            sky_parameters["psi"],
+            mode,
+        )
+        signal += np.asarray(polarization) * det_response
+
+    time_shift = bilby_detector.time_delay_from_geocenter(
+        sky_parameters["ra"], sky_parameters["dec"], sky_parameters["geocent_time"]
+    )
+    dt = sky_parameters["geocent_time"] + time_shift - waveform_generator.start_time
+    n_roll = int(np.round(dt * waveform_generator.sampling_frequency))
+
+    return np.roll(signal, n_roll)
