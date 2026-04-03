@@ -99,6 +99,10 @@ def get_gw_waveform(
     frequency_domain_source_model=None,
 ):
     par, _ = bilby.gw.conversion.convert_to_lal_binary_black_hole_parameters(parameters)
+    uses_bilby_generator = should_use_bilby_waveform_generator(
+        waveform_approximant=waveform_approximant,
+        frequency_domain_source_model=frequency_domain_source_model,
+    )
 
     mass_1_SI = par["mass_1"] * solar_mass
     mass_2_SI = par["mass_2"] * solar_mass
@@ -111,8 +115,11 @@ def get_gw_waveform(
         nearest_trigger_idx = np.argmin(np.abs(time - par["geocent_time"]))
         pre_trigger_duration = time[nearest_trigger_idx] - time[0]
 
-    # Get the approximant number from the name
-    approximant = _get_lalsim_approximant(waveform_approximant)
+    approximant = None
+    if not uses_bilby_generator:
+        # Custom Bilby source models such as bilby_tgr.pseob do not need a
+        # LALSimulation approximant lookup and may use names unknown to LAL.
+        approximant = _get_lalsim_approximant(waveform_approximant)
 
     # Estimate a minimum frequency required to ensure the waveform covers the data
     # Note there is a fudge factor as SimInspiralChirpStartFrequencyBound includes
@@ -128,12 +135,13 @@ def get_gw_waveform(
         )
 
     # Check if the reference frequency is used, if not use f_min
-    if (
-        lalsim.SimInspiralGetSpinFreqFromApproximant(approximant)
+    if reference_frequency == "fmin":
+        f_ref = f_min
+    elif (
+        not uses_bilby_generator
+        and lalsim.SimInspiralGetSpinFreqFromApproximant(approximant)
         == lalsim.SIM_INSPIRAL_SPINS_FLOW
     ):
-        f_ref = f_min
-    elif reference_frequency == "fmin":
         f_ref = f_min
     else:
         f_ref = reference_frequency
@@ -192,11 +200,7 @@ def get_gw_waveform(
     if waveform_dictionary is None:
         waveform_dictionary = lal.CreateDict()
 
-    use_bilby_generator = should_use_bilby_waveform_generator(
-        approximant, frequency_domain_source_model
-    )
-
-    if use_bilby_generator:
+    if uses_bilby_generator:
         if waveform_generator is None:
             raise ValueError(
                 f"No bilby waveform generator available for {waveform_approximant}"
@@ -299,14 +303,22 @@ def instantiate_bilby_waveform_generator(inputs, time):
     )
 
 
-def should_use_bilby_waveform_generator(approximant, frequency_domain_source_model):
+def should_use_bilby_waveform_generator(
+    waveform_approximant=None,
+    frequency_domain_source_model=None,
+    approximant=None,
+):
     uses_custom_source_model = frequency_domain_source_model not in [
         None,
         "lal_binary_black_hole",
     ]
-    return uses_custom_source_model or not lalsim.SimInspiralImplementedTDApproximants(
-        approximant
-    )
+    if uses_custom_source_model:
+        return True
+
+    if approximant is None:
+        approximant = _get_lalsim_approximant(waveform_approximant)
+
+    return not lalsim.SimInspiralImplementedTDApproximants(approximant)
 
 
 def should_retry_with_bilby_waveform_generator(exc):
