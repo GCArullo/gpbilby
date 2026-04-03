@@ -4,6 +4,18 @@ from bilby_pipe.data_analysis import DataAnalysisInput
 from bilby_pipe.utils import nonestr, convert_string_to_list, convert_prior_string_input, convert_string_to_dict
 
 
+def parse_bool(value):
+    if isinstance(value, bool):
+        return value
+
+    value = str(value).strip().lower()
+    if value in {"true", "1", "yes", "y", "on"}:
+        return True
+    if value in {"false", "0", "no", "n", "off"}:
+        return False
+    raise ValueError(f"Unable to parse boolean value {value!r}")
+
+
 class GPBilbyInputs(DataAnalysisInput):
     """Handles user-input for the GPBilbyInputs script"""
 
@@ -98,10 +110,15 @@ def create_parser():
         help="A dictionary of kernel priors (alternative to prior-file)",
     )
     gp.add("--noise-only-run", default=False, action="store_true", help="")
-    gp.add("--yerr-scaled", default=1e-2, help="Fractional amplitude uncertainty")
+    gp.add(
+        "--yerr-scaled",
+        type=float,
+        default=1e-2,
+        help="Fractional amplitude uncertainty",
+    )
     gp.add(
         "--convert-calibration",
-        type=bool,
+        type=parse_bool,
         default=True,
         help="If true, convert calibration uncertainty"
     )

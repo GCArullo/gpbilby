@@ -89,10 +89,16 @@ class Strain(object):
             self.yerr_scaled = self.yerr / self.scale
             self.yerr_scaled = self.yerr_scaled[self.idxs]
         else:
-            self.yerr_scaled = inputs.yerr_scaled
+            raw_yerr_scaled = np.asarray(inputs.yerr_scaled, dtype=float)
+            if raw_yerr_scaled.ndim == 0:
+                self.yerr_scaled = np.full_like(self.x, raw_yerr_scaled.item(), dtype=float)
+            elif raw_yerr_scaled.shape == self.x.shape:
+                self.yerr_scaled = raw_yerr_scaled
+            else:
+                self.yerr_scaled = raw_yerr_scaled[self.idxs]
+
             print(f"WARNING: using yerr of {self.yerr_scaled}")
             self.yerr = self.yerr_scaled * self.scale
-            self.yerr = self.yerr[self.idxs]
 
     def process(self, x, y):
         y = y * self.window

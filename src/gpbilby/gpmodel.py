@@ -317,7 +317,16 @@ def should_retry_with_bilby_waveform_generator(exc):
 def get_gw_waveform_via_bilby_generator(
     time, parameters, sky_parameters, bilby_detector, waveform_generator
 ):
-    waveform_polarizations = waveform_generator.time_domain_strain(parameters)
+    try:
+        waveform_polarizations = waveform_generator.time_domain_strain(parameters)
+    except TypeError as exc:
+        # bilby_tgr.pseob returns None for handled waveform-domain failures.
+        if "'NoneType' object is not iterable" in str(exc):
+            raise ValueError(
+                "Waveform generator returned no time-domain polarizations"
+            ) from exc
+        raise
+
     if waveform_polarizations is None:
         raise ValueError("Waveform generator returned no time-domain polarizations")
 

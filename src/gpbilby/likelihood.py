@@ -5,6 +5,10 @@ import numpy as np
 
 from .gpmodel import get_model
 
+KNOWN_WAVEFORM_FAILURE_MESSAGES = (
+    "Waveform generator returned no time-domain polarizations",
+)
+
 
 class FrequencySHOTerm(terms.SHOTerm):
     parameter_names = ("log_S0", "log_Q", "frequency")
@@ -180,6 +184,8 @@ class SingleDetectorCeleriteLikelihood(bilby.Likelihood):
         try:
             return self.gp.log_likelihood(self.y_scaled)
         except Exception as e:
+            if any(message in str(e) for message in KNOWN_WAVEFORM_FAILURE_MESSAGES):
+                return -np.inf
             print(f"Likelihood evaluation failed: {e}")
             return -np.inf
 
