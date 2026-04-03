@@ -62,6 +62,47 @@ class GPBilbyInputs(DataAnalysisInput):
         self.spline_calibration_envelope_dict = args.spline_calibration_envelope_dict
         self.convert_calibration = args.convert_calibration
 
+    def get_default_waveform_generator_class_ctor_arguments(self):
+        parent_method = getattr(
+            super(),
+            "get_default_waveform_generator_class_ctor_arguments",
+            None,
+        )
+        if parent_method is not None:
+            return parent_method()
+
+        constructor_kwargs = {}
+        ctor_args = getattr(self, "waveform_generator_class_ctor_args", None)
+        if ctor_args is not None:
+            constructor_kwargs.update(convert_string_to_dict(ctor_args))
+        return constructor_kwargs
+
+    def get_default_waveform_arguments(self):
+        parent_method = getattr(super(), "get_default_waveform_arguments", None)
+        if parent_method is not None:
+            return parent_method()
+
+        waveform_arguments = dict(
+            reference_frequency=self.reference_frequency,
+            waveform_approximant=self.waveform_approximant,
+            minimum_frequency=self.minimum_frequency,
+            maximum_frequency=self.maximum_frequency,
+            catch_waveform_errors=self.catch_waveform_errors,
+            pn_spin_order=self.pn_spin_order,
+            pn_tidal_order=self.pn_tidal_order,
+            pn_phase_order=self.pn_phase_order,
+            pn_amplitude_order=self.pn_amplitude_order,
+            mode_array=self.mode_array,
+        )
+
+        extra_waveform_arguments = getattr(self, "waveform_arguments_dict", None)
+        if extra_waveform_arguments is not None:
+            waveform_arguments.update(
+                convert_string_to_dict(extra_waveform_arguments)
+            )
+
+        return waveform_arguments
+
 
 def create_parser():
     parser = bilby_pipe.main.create_parser(top_level=False)
