@@ -8,6 +8,10 @@ from .gpmodel import get_model
 KNOWN_WAVEFORM_FAILURE_MESSAGES = (
     "Waveform generator returned no time-domain polarizations",
 )
+KNOWN_GP_SOLVER_FAILURE_MESSAGES = (
+    "failed to factorize or solve matrix",
+)
+MAX_GP_SOLVER_DIAGNOSTICS = 5
 
 
 class FrequencySHOTerm(terms.SHOTerm):
@@ -145,6 +149,7 @@ class SingleDetectorCeleriteLikelihood(bilby.Likelihood):
         self.gp = celerite.GP(kernel, mean=model, fit_mean=signal)
         self.gp.compute(self.x, yerr=self.yerr_scaled)
         self.gp_parameter_names = self.gp.parameter_names
+        self._gp_solver_diagnostic_count = 0
 
         parameters = {}
         for name in self.gp_parameter_names:
@@ -161,6 +166,87 @@ class SingleDetectorCeleriteLikelihood(bilby.Likelihood):
             parameters[bname] = bval
 
         super().__init__(parameters=parameters)
+
+    @staticmethod
+    def _format_parameter_items(parameter_dict):
+        items = []
+        for key, value in sorted(parameter_dict.items()):
+            if isinstance(value, np.generic):
+                value = value.item()
+
+            if isinstance(value, float):
+                items.append(f"{key}={value:.6e}")
+            else:
+                items.append(f"{key}={value}")
+
+        return ", ".join(items)
+
+    @staticmethod
+    def _summarize_array(name, values):
+        values = np.asarray(values)
+        finite_values = values[np.isfinite(values)]
+        if finite_values.size == 0:
+            return f"{name}: size={values.size}, finite=0"
+
+        return (
+            f"{name}: size={values.size}, finite={finite_values.size}, "
+            f"min={np.min(finite_values):.6e}, "
+            f"median={np.median(finite_values):.6e}, "
+            f"max={np.max(finite_values):.6e}"
+        )
+
+    def _summarize_mean_model(self):
+        mean_model = getattr(self.gp, "mean", None)
+        if mean_model is None:
+            return "mean_model: unavailable"
+
+        if hasattr(mean_model, "get_value"):
+            try:
+                mean_value = mean_model.get_value(self.x)
+            except Exception as exc:
+                return f"mean_model: unavailable ({exc})"
+            return self._summarize_array("mean_model", mean_value)
+
+        return f"mean_model: scalar={mean_model}"
+
+    def _emit_gp_solver_diagnostics(self, exception, parameters):
+        self._gp_solver_diagnostic_count += 1
+        if self._gp_solver_diagnostic_count > MAX_GP_SOLVER_DIAGNOSTICS:
+            if self._gp_solver_diagnostic_count == MAX_GP_SOLVER_DIAGNOSTICS + 1:
+                print(
+                    f"GP solver diagnostics suppressed for {self.detector} after "
+                    f"{MAX_GP_SOLVER_DIAGNOSTICS} failures"
+                )
+            return
+
+        gp_parameters = self.gp.get_parameter_dict()
+        kernel_parameters = {
+            key: value for key, value in gp_parameters.items() if key.startswith("kernel")
+        }
+        mean_parameters = {
+            key: value for key, value in gp_parameters.items() if key.startswith("mean:")
+        }
+
+        print(
+            f"GP solver diagnostic [{self.detector} "
+            f"{self._gp_solver_diagnostic_count}/{MAX_GP_SOLVER_DIAGNOSTICS}]: {exception}"
+        )
+        print(
+            "  kernel parameters: "
+            f"{self._format_parameter_items(kernel_parameters)}"
+        )
+        if mean_parameters:
+            print(
+                "  mean parameters: "
+                f"{self._format_parameter_items(mean_parameters)}"
+            )
+        print(
+            "  likelihood parameters: "
+            f"{self._format_parameter_items(parameters)}"
+        )
+        print(f"  {self._summarize_array('y_scaled', self.y_scaled)}")
+        print(f"  {self._summarize_array('yerr_scaled', self.yerr_scaled)}")
+        print(f"  {self._summarize_mean_model()}")
 
     def update_gp_parameters(self, parameters):
         for key, val in parameters.items():
@@ -184,7 +270,15 @@ class SingleDetectorCeleriteLikelihood(bilby.Likelihood):
         try:
             return self.gp.log_likelihood(self.y_scaled)
         except Exception as e:
-            if any(message in str(e) for message in KNOWN_WAVEFORM_FAILURE_MESSAGES):
+            exception_message = str(e)
+            if any(message in exception_message for message in KNOWN_WAVEFORM_FAILURE_MESSAGES):
+                return -np.inf
+            if any(
+                message in exception_message.lower()
+                for message in KNOWN_GP_SOLVER_FAILURE_MESSAGES
+            ):
+                print(f"Likelihood evaluation failed: {e}")
+                self._emit_gp_solver_diagnostics(e, parameters)
                 return -np.inf
             print(f"Likelihood evaluation failed: {e}")
             return -np.inf
